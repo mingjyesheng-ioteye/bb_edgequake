@@ -489,18 +489,27 @@ async fn main() -> Result<()> {
     // Get API key from environment (optional - Ollama doesn't need it)
     let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
 
-    let database_url = std::env::var("DATABASE_URL").context(
-        "DATABASE_URL is required; start PostgreSQL and rerun make dev or make dev-auth",
-    )?;
-
-    let redacted_database_url = redact_database_url(&database_url);
-    info!("🐘 PostgreSQL storage mode using {}", redacted_database_url);
-    let mut state = AppState::new_postgres(&database_url, &api_key)
-        .await
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
-        .with_context(|| {
-            format!("failed to initialize PostgreSQL storage at {redacted_database_url}")
-        })?;
+    let mut state = match std::env::var("DATABASE_URL") {
+        Ok(database_url) => {
+            let redacted_database_url = redact_database_url(&database_url);
+            info!("🐘 PostgreSQL storage mode using {}", redacted_database_url);
+            AppState::new_postgres(&database_url, &api_key)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
+                .with_context(|| {
+                    format!("failed to initialize PostgreSQL storage at {redacted_database_url}")
+                })?
+        }
+        Err(_) => {
+            info!("💾 Memory storage mode (ephemeral — data lost on restart)");
+            info!("   Set DATABASE_URL to switch to persistent PostgreSQL storage");
+            AppState::new_memory(if api_key.is_empty() {
+                None::<String>
+            } else {
+                Some(api_key.clone())
+            })
+        }
+    };
 
     // Initialize default tenant and workspace for non-authenticated mode
     if let Err(e) = state.initialize_defaults().await {
@@ -511,21 +520,40 @@ async fn main() -> Result<()> {
     // This ensures that rebuild/reprocess operations use the workspace's configured
     // LLM and embedding providers, not the server's default providers.
     //
-    // OODA-03: Always use STRICT workspace isolation mode (PostgreSQL required now).
+    // OODA-03: Use STRICT workspace isolation for PostgreSQL, standard for memory mode.
     // OODA-223: Strict mode enforces workspace isolation.
     // OODA-10: Also attach progress broadcaster for WebSocket event delivery.
-    info!("🔒 Using STRICT workspace isolation mode (PostgreSQL storage)");
-    let mut processor = DocumentTaskProcessor::with_workspace_support_strict(
-        Arc::clone(&state.pipeline),
-        Arc::clone(&state.llm_provider),
-        Arc::clone(&state.kv_storage),
-        Arc::clone(&state.vector_storage),
-        Arc::clone(&state.vector_registry),
-        Arc::clone(&state.graph_storage),
-        state.pipeline_state.clone(),
-        Arc::clone(&state.workspace_service),
-        Arc::clone(&state.models_config),
-    )
+    let is_postgres = matches!(state.storage_mode, edgequake_api::StorageMode::PostgreSQL);
+    if is_postgres {
+        info!("🔒 Using STRICT workspace isolation mode (PostgreSQL storage)");
+    } else {
+        info!("🔓 Using STANDARD workspace isolation mode (memory storage)");
+    }
+    let mut processor = if is_postgres {
+        DocumentTaskProcessor::with_workspace_support_strict(
+            Arc::clone(&state.pipeline),
+            Arc::clone(&state.llm_provider),
+            Arc::clone(&state.kv_storage),
+            Arc::clone(&state.vector_storage),
+            Arc::clone(&state.vector_registry),
+            Arc::clone(&state.graph_storage),
+            state.pipeline_state.clone(),
+            Arc::clone(&state.workspace_service),
+            Arc::clone(&state.models_config),
+        )
+    } else {
+        DocumentTaskProcessor::with_workspace_support(
+            Arc::clone(&state.pipeline),
+            Arc::clone(&state.llm_provider),
+            Arc::clone(&state.kv_storage),
+            Arc::clone(&state.vector_storage),
+            Arc::clone(&state.vector_registry),
+            Arc::clone(&state.graph_storage),
+            state.pipeline_state.clone(),
+            Arc::clone(&state.workspace_service),
+            Arc::clone(&state.models_config),
+        )
+    }
     .with_progress_broadcaster(state.progress_broadcaster.clone());
 
     // CRITICAL: Attach PDF storage for PDF processing tasks
