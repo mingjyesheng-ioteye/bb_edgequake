@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use tower_http::{
     compression::CompressionLayer,
     cors::{Any, CorsLayer},
+    services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
 use tracing::info;
@@ -84,6 +85,44 @@ impl Server {
     /// Build the application router with all middleware.
     pub fn build_router(&self) -> axum::Router {
         let mut app = create_router(self.state.clone());
+
+        // Optional: serve the edgequake_webui static export.
+        // Priority order:
+        //   1. EDGEQUAKE_WEBUI_DIR env var (explicit path)
+        //   2. Auto-discovery: look for webui/ or out/ adjacent to the exe
+        let webui_path: Option<std::path::PathBuf> = {
+            // 1. Explicit env var
+            let from_env = std::env::var("EDGEQUAKE_WEBUI_DIR").ok().and_then(|d| {
+                let p = std::path::PathBuf::from(d);
+                if p.is_dir() { Some(p) } else { None }
+            });
+            // 2. Adjacent to executable
+            let from_exe = from_env.is_none().then(|| {
+                std::env::current_exe().ok().and_then(|exe| {
+                    let dir = exe.parent()?;
+                    for candidate in &["webui", "edgequake-webui", "out"] {
+                        let p = dir.join(candidate);
+                        if p.is_dir() && p.join("index.html").exists() {
+                            return Some(p);
+                        }
+                    }
+                    None
+                })
+            }).flatten();
+            from_env.or(from_exe)
+        };
+
+        if let Some(webui_path) = webui_path {
+            let index_path = webui_path.join("index.html");
+            // Serve the static export as a fallback: API routes remain
+            // highest priority; the webui catches everything else.
+            let serve_dir = ServeDir::new(&webui_path)
+                .not_found_service(ServeFile::new(&index_path));
+            app = app.fallback_service(serve_dir);
+            info!("WebUI static files served from {}", webui_path.display());
+        } else {
+            tracing::debug!("No webui directory found — serving API only");
+        }
 
         // Add middleware
         app = app

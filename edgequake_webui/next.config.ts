@@ -20,11 +20,17 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: false,
   },
 
-  // Enable Turbopack for faster builds (Next.js 16+)
-  // Turbopack is enabled by default with `next build` in Next.js 16
+  // Turbopack: explicitly set root to the project directory to avoid
+  // workspace-root misdetection in monorepo setups.
+  turbopack: {
+    root: __dirname,
+  },
 
-  // Output configuration
-  output: "standalone",
+  // Output configuration – static export so the Rust edgequake binary can
+  // serve the UI directly via tower-http ServeDir (no Node.js runtime needed).
+  output: "export",
+  // Static export: disable image optimisation (requires a server)
+  images: { unoptimized: true },
 
   // Reduce logging
   logging: {
