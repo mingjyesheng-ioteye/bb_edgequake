@@ -77,6 +77,11 @@ pub async fn download_pdf(
     let pdf_id = Uuid::parse_str(&pdf_id)
         .map_err(|_| ApiError::BadRequest("Invalid PDF ID format".to_string()))?;
 
+    // Memory mode: no PDF storage
+    if state.storage_mode.is_memory() {
+        return Err(ApiError::NotFound("PDF not found".to_string()));
+    }
+
     let pdf_storage = get_pdf_storage(&state)?;
 
     let pdf = pdf_storage
@@ -158,6 +163,11 @@ pub async fn get_pdf_content(
 ) -> ApiResult<Json<PdfContentResponse>> {
     let pdf_id = Uuid::parse_str(&pdf_id)
         .map_err(|_| ApiError::BadRequest("Invalid PDF ID format".to_string()))?;
+
+    // Memory mode: no PDF storage
+    if state.storage_mode.is_memory() {
+        return Err(ApiError::NotFound("PDF not found".to_string()));
+    }
 
     let pdf_storage = get_pdf_storage(&state)?;
 

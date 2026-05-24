@@ -50,6 +50,11 @@ pub async fn get_pdf_status(
     let pdf_id = Uuid::parse_str(&pdf_id)
         .map_err(|_| ApiError::BadRequest("Invalid PDF ID format".to_string()))?;
 
+    // Memory mode: PDFs are ingested as regular documents, no pdf_id index
+    if state.storage_mode.is_memory() {
+        return Err(ApiError::NotFound("PDF not found".to_string()));
+    }
+
     let pdf_storage = get_pdf_storage(&state)?;
 
     let pdf = pdf_storage
@@ -119,6 +124,18 @@ pub async fn list_pdfs(
     context: TenantContext,
     Query(query): Query<ListPdfsQuery>,
 ) -> ApiResult<Json<ListPdfsResponse>> {
+    // Memory mode: no PDF storage — return empty list
+    if state.storage_mode.is_memory() {
+        return Ok(Json(ListPdfsResponse {
+            items: vec![],
+            pagination: PdfPaginationInfo {
+                page: query.page,
+                page_size: query.page_size,
+                total_count: 0,
+                total_pages: 0,
+            },
+        }));
+    }
     let pdf_storage = get_pdf_storage(&state)?;
 
     let workspace_id = context.workspace_id_uuid();
@@ -196,6 +213,11 @@ pub async fn delete_pdf(
 ) -> ApiResult<StatusCode> {
     let pdf_id = Uuid::parse_str(&pdf_id)
         .map_err(|_| ApiError::BadRequest("Invalid PDF ID format".to_string()))?;
+
+    // Memory mode: no PDF storage
+    if state.storage_mode.is_memory() {
+        return Err(ApiError::NotFound("PDF not found".to_string()));
+    }
 
     let pdf_storage = get_pdf_storage(&state)?;
 
