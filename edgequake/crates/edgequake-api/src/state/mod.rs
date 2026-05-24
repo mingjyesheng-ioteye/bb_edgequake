@@ -295,9 +295,21 @@ impl AppState {
         );
 
         // Create default workspace within the tenant
-        // SPEC-032: Uses server defaults for embedding configuration
+        // SPEC-032: Use server's actual embedding configuration so the workspace
+        // vector dimension matches the embedding provider (e.g. nomic=768, openai=1536).
+        let default_embedding_model = std::env::var("EDGEQUAKE_DEFAULT_EMBEDDING_MODEL")
+            .or_else(|_| std::env::var("OLLAMA_EMBEDDING_MODEL"))
+            .unwrap_or_else(|_| "text-embedding-3-small".to_string());
         let mut workspace_request = CreateWorkspaceRequest::new("Default Workspace")
-            .with_embedding_model("text-embedding-3-small");
+            .with_embedding_model(&default_embedding_model);
+        // If an explicit dimension is set, honour it; otherwise rely on auto-detection.
+        if let Ok(dim_str) = std::env::var("EDGEQUAKE_DEFAULT_EMBEDDING_DIMENSION")
+            .or_else(|_| std::env::var("EDGEQUAKE_EMBEDDING_DIMENSION"))
+        {
+            if let Ok(dim) = dim_str.parse::<usize>() {
+                workspace_request.embedding_dimension = Some(dim);
+            }
+        }
         workspace_request.slug = Some("default".to_string());
 
         let workspace = self

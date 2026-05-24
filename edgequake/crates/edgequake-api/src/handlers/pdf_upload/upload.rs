@@ -522,7 +522,13 @@ async fn handle_pdf_memory_mode(
         .await
         .map_err(|e| ApiError::Internal(format!("PDF text extraction failed: {}", e)))?;
 
-    // 2. Route through the regular text document pipeline
+    // 2. Route through the regular text document pipeline.
+    // WHY async: synchronous processing holds the HTTP connection open for the
+    // full LLM extraction pass. With local Ollama (cold model warmup) this can
+    // take several minutes and the UI / proxies time out, leaving the upload
+    // stuck on "Uploading to server...". Returning immediately with a track_id
+    // lets the frontend follow progress over the WebSocket like the non-memory
+    // PDF path already does.
     let request = UploadDocumentRequest {
         content: markdown,
         title: options
@@ -530,7 +536,7 @@ async fn handle_pdf_memory_mode(
             .clone()
             .or_else(|| Some(filename.clone())),
         metadata: options.metadata.clone(),
-        async_processing: false,
+        async_processing: true,
         track_id: options.track_id.clone(),
         enable_gleaning: true,
         max_gleaning: 2,
@@ -542,13 +548,14 @@ async fn handle_pdf_memory_mode(
 
     // 3. Wrap result in a PDF-shaped response so the frontend behaves normally
     let synthetic_id = Uuid::new_v4().to_string();
+    let effective_track_id = Some(doc_resp.track_id.clone());
     Ok(Json(PdfUploadResponse {
         pdf_id: synthetic_id.clone(),
         document_id: Some(doc_resp.document_id.clone()),
-        status: "completed".to_string(),
+        status: "processing".to_string(),
         task_id: synthetic_id,
-        track_id: options.track_id,
-        message: "PDF text extracted and ingested (memory mode)".to_string(),
+        track_id: effective_track_id,
+        message: "PDF text extracted, processing in background (memory mode)".to_string(),
         estimated_time_seconds: 0,
         metadata: PdfMetadata {
             filename,
