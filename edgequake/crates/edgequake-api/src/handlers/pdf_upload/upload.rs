@@ -2,6 +2,7 @@ use axum::extract::State;
 use axum::Json;
 use axum_extra::extract::Multipart;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use super::helpers::{
     clear_document_derived_data, create_pdf_processing_task, estimate_processing_time,
@@ -171,6 +172,11 @@ pub async fn upload_pdf_document(
         file_data.len(),
         checksum
     );
+
+    // 4. Memory-mode fallback: no PDF storage available, extract text inline
+    if state.storage_mode.is_memory() {
+        return handle_pdf_memory_mode(state, context, file_data, filename, checksum, options).await;
+    }
 
     // 4. Get PDF storage (platform-specific)
     let pdf_storage = get_pdf_storage(&state)?;
@@ -472,6 +478,85 @@ pub async fn upload_pdf_document(
             sha256_checksum: checksum,
             vision_enabled: options.enable_vision,
             vision_model,
+        },
+        duplicate_of: None,
+    }))
+}
+
+/// Memory-mode fallback for PDF upload.
+///
+/// When running without PostgreSQL (no `pdf_storage`), extract the PDF text
+/// using EdgeParse (CPU-only) and route through the regular document pipeline.
+/// Data is held in memory and lost on restart, consistent with all other
+/// memory-mode storage.
+async fn handle_pdf_memory_mode(
+    state: AppState,
+    context: TenantContext,
+    file_data: Vec<u8>,
+    filename: String,
+    checksum: String,
+    options: PdfUploadOptions,
+) -> ApiResult<Json<PdfUploadResponse>> {
+    use crate::handlers::documents::upload_document;
+    use crate::handlers::documents_types::UploadDocumentRequest;
+    use edgequake_pdf::{PdfConversionConfig, create_pdf_converter, PdfParserBackend};
+
+    info!(
+        "Memory mode: extracting PDF text for '{}' ({}B)",
+        filename,
+        file_data.len()
+    );
+
+    // 1. Extract PDF → markdown using EdgeParse (CPU-only, no LLM needed)
+    let backend = options
+        .pdf_parser_backend
+        .clone()
+        .unwrap_or(PdfParserBackend::EdgeParse);
+    let converter = create_pdf_converter(backend, None);
+    let config = PdfConversionConfig {
+        filename: Some(filename.clone()),
+        ..Default::default()
+    };
+    let markdown = converter
+        .convert(&file_data, &config)
+        .await
+        .map_err(|e| ApiError::Internal(format!("PDF text extraction failed: {}", e)))?;
+
+    // 2. Route through the regular text document pipeline
+    let request = UploadDocumentRequest {
+        content: markdown,
+        title: options
+            .title
+            .clone()
+            .or_else(|| Some(filename.clone())),
+        metadata: options.metadata.clone(),
+        async_processing: false,
+        track_id: options.track_id.clone(),
+        enable_gleaning: true,
+        max_gleaning: 2,
+        use_llm_summarization: true,
+    };
+
+    let (_status, Json(doc_resp)) =
+        upload_document(State(state), context, Json(request)).await?;
+
+    // 3. Wrap result in a PDF-shaped response so the frontend behaves normally
+    let synthetic_id = Uuid::new_v4().to_string();
+    Ok(Json(PdfUploadResponse {
+        pdf_id: synthetic_id.clone(),
+        document_id: Some(doc_resp.document_id.clone()),
+        status: "completed".to_string(),
+        task_id: synthetic_id,
+        track_id: options.track_id,
+        message: "PDF text extracted and ingested (memory mode)".to_string(),
+        estimated_time_seconds: 0,
+        metadata: PdfMetadata {
+            filename,
+            file_size_bytes: file_data.len() as i64,
+            page_count: None,
+            sha256_checksum: checksum,
+            vision_enabled: false,
+            vision_model: None,
         },
         duplicate_of: None,
     }))
