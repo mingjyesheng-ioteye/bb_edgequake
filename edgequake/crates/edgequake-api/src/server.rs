@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use tower_http::{
     compression::CompressionLayer,
     cors::{Any, CorsLayer},
-    services::{ServeDir, ServeFile},
+    services::ServeDir,
     trace::TraceLayer,
 };
 use tracing::info;
@@ -114,11 +114,39 @@ impl Server {
 
         if let Some(webui_path) = webui_path {
             let index_path = webui_path.join("index.html");
-            // Serve the static export as a fallback: API routes remain
-            // highest priority; the webui catches everything else.
-            let serve_dir = ServeDir::new(&webui_path)
-                .not_found_service(ServeFile::new(&index_path));
-            app = app.fallback_service(serve_dir);
+            // Read index.html once for the SPA fallback.
+            // tower-http 0.6's not_found_service preserves the 404 status code;
+            // a custom fallback handler is needed to return 200 so Next.js
+            // client-side routing can render the correct page.
+            let index_html = std::sync::Arc::new(
+                std::fs::read(&index_path).unwrap_or_default(),
+            );
+            let webui = std::sync::Arc::new(webui_path.clone());
+            let idx = index_html.clone();
+            app = app.fallback(move |req: axum::extract::Request| {
+                let webui = webui.clone();
+                let idx = idx.clone();
+                async move {
+                    use tower::ServiceExt as _;
+                    let serve = ServeDir::new(webui.as_ref());
+                    match serve.oneshot(req).await {
+                        Ok(resp)
+                            if resp.status().is_success()
+                                || resp.status().is_redirection() =>
+                        {
+                            resp.map(axum::body::Body::new)
+                        }
+                        _ => axum::response::Response::builder()
+                            .status(axum::http::StatusCode::OK)
+                            .header(
+                                axum::http::header::CONTENT_TYPE,
+                                "text/html; charset=utf-8",
+                            )
+                            .body(axum::body::Body::from((*idx).clone()))
+                            .unwrap(),
+                    }
+                }
+            });
             info!("WebUI static files served from {}", webui_path.display());
         } else {
             tracing::debug!("No webui directory found — serving API only");

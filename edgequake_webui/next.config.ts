@@ -29,6 +29,9 @@ const nextConfig: NextConfig = {
   // Output configuration – static export so the Rust edgequake binary can
   // serve the UI directly via tower-http ServeDir (no Node.js runtime needed).
   output: "export",
+  // trailingSlash: generates graph/index.html (not graph.html) so ServeDir
+  // can match requests for /graph/ without needing the SPA fallback.
+  trailingSlash: true,
   // Static export: disable image optimisation (requires a server)
   images: { unoptimized: true },
 
